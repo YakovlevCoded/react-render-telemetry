@@ -8,8 +8,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "pnpm -r build",
-    "start:mcp": "pnpm --filter @plata/render-telemetry-mcp start"
+    "build:scan": "pnpm --filter react-scan build",
+    "sync:scan-from-fork": "rsync -a --exclude=node_modules --exclude=dist /Users/leonid.iakovlev/Desktop/work/plata/react-scan/packages/scan/ packages/scan/",
+    "start:mcp": "node packages/mcp-server/src/index.js"
   },
   "author": "Leonid Iakovlev <leonid.iakovlev@plata.work>",
   "license": "MIT"
