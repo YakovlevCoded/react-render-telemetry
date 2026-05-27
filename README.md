@@ -197,76 +197,71 @@ behind a dev-only flag so it doesn't ship to production.
 
 ---
 
-## Honest findings from the pilot
+## Measurement methodology
 
-We tested this on a real product app's CFDI (Mexican e-invoice) flow:
-open a multi-step wizard, type "Cof" into the line-item autocomplete,
-click "Create item", and watch the nested drawer mount. ~3 keystrokes +
-two drawer opens.
+Apparent perf wins are easy to fake. The workflow this tool enforces is
+designed to keep the numbers honest:
 
-### What we measured
+### 1. Always use full reloads between BEFORE and AFTER
 
-| Metric | Value |
-|---|---|
-| Total React commits in scenario | ~28 |
-| Total renders (react-scan, all components) | ~818 |
-| Total mounts | ~64 |
-| Unique components touched | 89 |
-| Top user-code component by render count | `Input × 23` (Aura wrapper, not our code) |
-| Largest user-code component we own | `CfdiTotalsItem × 8` |
-| Worst frame during scenario | <33 ms |
-| Long tasks (>50 ms) | 0 |
+Hot-module-replacement injects new module versions in place, which forces
+React to unmount and remount the patched subtree. The next render
+recording therefore picks up extra commits that don't exist in steady
+state. The naïve "edit code → re-run scenario → compare counts" workflow
+will report a perf "improvement" that's actually just HMR remount churn.
 
-### What we tried, what didn't work
+The `prime_and_reload` tool performs a full reload before each
+measurement window, and `reset` clears the Store. Together they give you
+apples-to-apples deltas.
 
-We hypothesised that two inline JSX patterns were causing wasted renders:
+### 2. Count what React actually executed, not what *might* have re-rendered
 
-1. `end={<HintTooltip ... />}` literal in a form's right-icon slot —
-   hoisted into a `useMemo`-stable element.
-2. Inline `onChange={(e) => strip(e) ? field.onChange('') : field.onChange(e)}`
-   inside FormField render-props — extracted into a memoised
-   `StrippedMaskedField` wrapper.
+A homegrown counter that diffs `fiber.memoizedProps !== fiber.alternate.memoizedProps`
+will count any component that received a new prop reference — including
+ones React skipped via `React.memo` / `useMemo` / `shouldComponentUpdate`.
+That's an over-count, and it'll show "wins" for memoisation that React
+already short-circuited.
 
-With a naïve "run the scenario, compare counts" workflow these looked
-like wins (-37% Button renders, -32% `Button.start` churn). With the
-proper **two full page reloads + reset between recordings** workflow that
-this tool now enforces, the delta is **+0.5%** on react-scan's counter
-and **+13%** on a separate prop-diff approximator — both inside noise.
+This tool uses react-scan's `traverseRenderedFibers` (via
+[`bippy`](https://github.com/aidenybai/bippy)), which only counts fibers
+React actually re-ran. The numbers are smaller and harder to move, but
+they reflect real CPU cost.
 
-### Why the earlier numbers were wrong
+### 3. Distinguish user-code hotspots from third-party churn
 
-- HMR contamination: after the in-place code patch, the dev server's HMR
-  injected fresh module versions, which forced React to unmount and
-  remount the entire subtree. The "after" recording therefore captured
-  several extra commits that weren't there in steady state. Looked like a
-  win, was an artefact.
-- A homegrown counter we built first counted *fibers with changed prop
-  references*. That overcounts components that received new prop
-  identities (e.g. inline lambdas) but were still skipped by React via
-  memoisation. react-scan's counter (via [bippy](https://github.com/aidenybai/bippy))
-  only counts fibers React actually re-ran. The latter is the right
-  ground truth for "did this cost time".
+Most React apps' top render-count entries are framework wrappers (Radix
+`Primitive.*`, Framer Motion `Presence`, Tooltip/Popper providers, etc.)
+that re-render constantly with their parents. They drown out the
+user-code signal in a raw snapshot.
 
-### Takeaway
+`snapshot { excludeFramework: true }` filters them out so the components
+*you can actually edit* are at the top. This is what you usually want for
+"where do I optimise" questions. Use `excludeFramework: false` when you
+suspect *how* you're using the third-party component is the problem.
 
-On the scenario we audited the top user-code component is
-**`CfdiTotalsItem × 8`** — well below any threshold worth optimising. The
-real cost (~80% of renders) lives in third-party primitives (Aura
-`Input`, Radix `Primitive.div`, Radix `Popper*`, Framer Motion
-`Presence`). We don't directly own that code, and there's no signal that
-*how we use it* is causing extra churn beyond what the libraries
-themselves emit on input/hover/scroll.
+### 4. Validate fixes with `diff_snapshots`
 
-**This is itself a result**: the MR we audited is safe from a
-re-render-cost standpoint, and we know it because we measured it
-properly.
+After applying a fix:
 
-For future perf hunts: the tool will quickly show whether a
-user-reported "this page feels slow" complaint has a real user-code
-hotspot (look for `find_hotspots`, then `snapshot { filter: "MyComponent" }`)
-or whether it's third-party-library churn (where the fix is architectural
-— virtualisation, lazier mounting, removing wrappers — not a one-line
-`useMemo`).
+```
+snapshot before
+[reload, apply fix, full reload again]
+snapshot after
+diff_snapshots { before, after }
+```
+
+The diff is sorted by absolute change. A real win shows up as a clear
+negative delta on the targeted component(s) and totals; noise looks like
+±5-15% jitter spread across the list with no clear winner. If you don't
+see your targeted component move, the fix isn't doing what you thought.
+
+### 5. Pick scenarios that exercise the suspected hotspot
+
+A scenario with 800 total renders and no single user-code entry above 25
+isn't going to surface a perf bug — there's no hotspot to optimise.
+Choose scenarios that actually exercise the suspected slow path
+(typing into a large list, opening a heavy drawer, scrolling a long
+virtualised view) and that produce a clear top entry in `find_hotspots`.
 
 ---
 
