@@ -7,3 +7,7 @@ node_modules
 dist
 .cache
 .tmp
+
+# Keep the forked react-scan build artefacts in-repo so the MCP server
+# works on a fresh clone without users having to run a build.
+!packages/scan/dist/
