@@ -25,10 +25,19 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const TELEMETRY_SRC = readFileSync(
-  join(__dirname, '..', '..', 'browser', 'src', 'render-telemetry.js'),
-  'utf8',
+const TELEMETRY_PATH = join(
+  __dirname,
+  '..',
+  '..',
+  'browser',
+  'src',
+  'render-telemetry.js',
 );
+// Re-read on every inject so source edits land immediately without a server
+// restart. Cheap (~30KB file, OS file cache).
+function readTelemetrySrc() {
+  return readFileSync(TELEMETRY_PATH, 'utf8');
+}
 
 const BROWSER_URL =
   process.env.RT_BROWSER_URL || 'http://localhost:9222';
@@ -48,7 +57,11 @@ async function getBrowser() {
 }
 
 async function getPage() {
-  if (page && !page.isClosed()) return page;
+  // Always re-grab the page list. Caching a Page reference between calls
+  // leaves us holding a detached Frame after every page.reload() / hard
+  // navigation, which fails CDP operations with "detached Frame" errors.
+  // The browser.pages() roundtrip is cheap (a few ms) compared to the cost
+  // of every recording session breaking.
   const b = await getBrowser();
   const pages = await b.pages();
   if (pages.length === 0)
@@ -63,7 +76,6 @@ async function getPage() {
       );
     page = match;
   } else {
-    // Prefer the most recently active non-extension page
     page =
       pages.find((p) => !p.url().startsWith('chrome-extension://')) ||
       pages[0];
@@ -77,7 +89,7 @@ async function ensureInjected() {
     () => typeof window.__renderTelemetry === 'object',
   );
   if (has) return { injected: false, alreadyPresent: true };
-  await p.evaluate(TELEMETRY_SRC);
+  await p.evaluate(readTelemetrySrc());
   // Wait a tick for the hook to attach
   await p.evaluate(() => new Promise((r) => setTimeout(r, 30)));
   return { injected: true, alreadyPresent: false };

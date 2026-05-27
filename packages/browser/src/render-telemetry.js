@@ -53,6 +53,8 @@
   let overlayEnabled = true;
   let inspectMode = false;
   let frozenSelection = null;
+  let logVisible = false;
+  let currentFps = 60;
   const renderHistory = new WeakMap(); // fiber.type → { count, lastTrigger, lastPropsChanged, lastStateChanged, lastT }
   const nameHistory = Object.create(null); // componentName → aggregate counts
 
@@ -104,6 +106,29 @@
     if (propsChanged.length > 0) return 'props';
     if (stateChanged) return 'state';
     return 'parent';
+  }
+
+  // Names that come from React itself, Radix, Framer Motion, or design-system
+  // wrappers — they re-render constantly with their parent and drown out the
+  // user-code signal. `summary` / `componentStats` skip them by default;
+  // raw events are still kept in the recording for forensic deep-dives.
+  const FRAMEWORK_NAMES = new Set([
+    'Presence', 'AnimatePresence', 'Slot', 'Slottable',
+    'Fragment', 'Suspense', 'StrictMode', 'Profiler',
+    'Provider', 'Consumer', 'Context.Provider', 'Context.Consumer',
+    'ForwardRef', 'Anonymous',
+    'PopperAnchor', 'PopperContent', 'PopperArrow',
+    'ScrollAreaScrollbar', 'ScrollAreaThumb', 'ScrollAreaCorner', 'ScrollAreaViewport',
+    'DialogPortal', 'DialogOverlay', 'DialogTitle', 'DialogDescription', 'DialogClose',
+    'TooltipTrigger', 'TooltipContent', 'TooltipPortal', 'TooltipArrow',
+    'Controller', // react-hook-form Controller
+  ]);
+  function isFrameworkName(n) {
+    if (!n) return true;
+    if (n[0] >= 'a' && n[0] <= 'z') return true; // host element
+    if (FRAMEWORK_NAMES.has(n)) return true;
+    if (n.startsWith('Primitive.')) return true; // Radix Primitive.*
+    return false;
   }
 
   function findHostNode(fiber, depth = 0) {
@@ -193,8 +218,32 @@
     }
   }
 
+  // Names that re-render constantly with their parent — visual noise that
+  // hides the actually interesting components. Recording still captures them.
+  const NOISY_OVERLAY_NAMES = new Set([
+    'Presence',
+    'AnimatePresence',
+    'Slot',
+    'Slottable',
+    'Primitive',
+    'ForwardRef',
+    'Anonymous',
+    'Provider',
+    'Consumer',
+    'Context.Provider',
+    'Context.Consumer',
+    'Fragment',
+    'Suspense',
+    'StrictMode',
+    'Profiler',
+  ]);
+
   function pushOutline(fiber, name) {
     if (!overlayEnabled) return;
+    // Skip host elements (div/a/button/span...) — they re-render with parent
+    // and only add visual noise. Recording still captures them.
+    if (typeof fiber.type === 'string') return;
+    if (NOISY_OVERLAY_NAMES.has(name)) return;
     const node = findHostNode(fiber);
     if (!node || !node.getBoundingClientRect) return;
     const r = node.getBoundingClientRect();
@@ -422,6 +471,7 @@
       });
       active.byName[name] = (active.byName[name] || 0) + 1;
     }
+    logEntry(name, trigger, t, propsChanged);
   }
 
   function recordMount(name, fiber, t, parents) {
@@ -446,6 +496,7 @@
       active.byName[name] = (active.byName[name] || 0) + 1;
       active.mountsByName[name] = (active.mountsByName[name] || 0) + 1;
     }
+    logEntry(name, 'mount', t);
   }
 
   // ════════════════════════════════════════════════════════════════════
@@ -456,7 +507,14 @@
     const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
     if (!hook || hookAttached) return hookAttached;
     hookAttached = true;
-    const original = hook.onCommitFiberRoot;
+    // Idempotent patch: cache the FIRST observed onCommitFiberRoot on the
+    // hook itself. If the runtime is re-injected (e.g. after `delete
+    // window.__renderTelemetry` + re-eval), reuse the same original so each
+    // commit fires our walk exactly once instead of once per past injection.
+    if (!hook.__rtOriginalCommit) {
+      hook.__rtOriginalCommit = hook.onCommitFiberRoot;
+    }
+    const original = hook.__rtOriginalCommit;
     hook.onCommitFiberRoot = function (id, root, ...rest) {
       const recording = !!active;
       if (recording || overlayEnabled) {
@@ -490,6 +548,9 @@
   let lastFrameTs = 0;
   let frameCount = 0;
   let lastSampleAt = 0;
+  // Rolling 1s FPS window — independent of recording state, drives the
+  // toolbar's live FPS readout.
+  const fpsRing = [];
   function rafLoop(ts) {
     if (lastFrameTs > 0) {
       const ms = ts - lastFrameTs;
@@ -499,6 +560,10 @@
           frameMs: Math.round(ms),
         });
       frameCount++;
+      // Rolling FPS: drop frames older than 1s
+      fpsRing.push(ts);
+      while (fpsRing.length && fpsRing[0] < ts - 1000) fpsRing.shift();
+      currentFps = fpsRing.length;
     }
     lastFrameTs = ts;
     if (active && ts - lastSampleAt > 100) {
@@ -789,12 +854,14 @@
         <div data-rt-dot style="width:8px;height:8px;border-radius:50%;background:#444"></div>
         <span data-rt-status-text>idle</span>
       </div>
-      <button data-rt-action="record">● Rec</button>
-      <button data-rt-action="inspect">⌖ Inspect</button>
-      <button data-rt-action="overlay">👁 Overlay</button>
-      <button data-rt-action="clear">⟲ Clear</button>
-      <button data-rt-action="export" title="copy snapshot to clipboard">⎘ JSON</button>
-      <button data-rt-action="hide" title="hide toolbar (Alt+Shift+R to show)">✕</button>
+      <div data-rt-fps style="padding:0 4px;color:#bbb;min-width:38px;text-align:right">— fps</div>
+      <button type="button" data-rt-action="record">● Rec</button>
+      <button type="button" data-rt-action="inspect">⌖ Inspect</button>
+      <button type="button" data-rt-action="overlay">👁 Overlay</button>
+      <button type="button" data-rt-action="log" title="toggle live event log">📜 Log</button>
+      <button type="button" data-rt-action="clear">⟲ Clear</button>
+      <button type="button" data-rt-action="export" title="copy snapshot to clipboard">⎘ JSON</button>
+      <button type="button" data-rt-action="hide" title="hide toolbar (Alt+Shift+R to show)">✕</button>
     `;
     toolbar.innerHTML = html;
     for (const b of toolbar.querySelectorAll('button')) {
@@ -854,6 +921,9 @@
       case 'export':
         copySnapshotToClipboard();
         break;
+      case 'log':
+        toggleLogPanel();
+        break;
       case 'hide':
         toolbar.style.display = 'none';
         toolbarHidden = true;
@@ -866,6 +936,7 @@
     if (!toolbar) return;
     const dot = toolbar.querySelector('[data-rt-dot]');
     const txt = toolbar.querySelector('[data-rt-status-text]');
+    const fpsEl = toolbar.querySelector('[data-rt-fps]');
     if (active) {
       dot.style.background = '#e53e3e';
       dot.style.boxShadow = '0 0 6px #e53e3e';
@@ -875,6 +946,14 @@
       dot.style.boxShadow = '';
       txt.textContent = 'idle';
     }
+    if (fpsEl) {
+      const fps = currentFps;
+      let color = '#48bb78'; // green
+      if (fps < 50) color = '#ed8936'; // orange
+      if (fps < 30) color = '#e53e3e'; // red
+      fpsEl.textContent = `${fps} fps`;
+      fpsEl.style.color = color;
+    }
     const buttons = toolbar.querySelectorAll('button');
     for (const b of buttons) {
       const a = b.getAttribute('data-rt-action');
@@ -882,9 +961,84 @@
       if (a === 'record') isOn = !!active;
       else if (a === 'inspect') isOn = inspectMode;
       else if (a === 'overlay') isOn = overlayEnabled;
+      else if (a === 'log') isOn = logVisible;
       b.style.cssText = btnStyle(isOn);
       if (a === 'record') b.textContent = active ? '■ Stop' : '● Rec';
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //   EVENT LOG PANEL
+  // ════════════════════════════════════════════════════════════════════
+  let logPanel = null;
+  let logList = null;
+  const MAX_LOG_ROWS = 200;
+  const TRIGGER_COLORS = {
+    mount: '#48bb78',
+    state: '#4299e1',
+    props: '#ed8936',
+    'props+state': '#9f7aea',
+    parent: '#a0aec0',
+  };
+
+  function ensureLogPanel() {
+    if (logPanel) return;
+    logPanel = document.createElement('div');
+    logPanel.setAttribute('data-render-telemetry', 'log');
+    logPanel.style.cssText = [
+      'position:fixed',
+      'top:54px',
+      'right:12px',
+      'width:380px',
+      'max-height:50vh',
+      'overflow-y:auto',
+      'overflow-x:hidden',
+      'background:rgba(20,20,23,0.94)',
+      'backdrop-filter:blur(8px)',
+      `border:1px solid #333`,
+      'border-radius:8px',
+      'padding:6px',
+      'font:10px ' + MONO_FONT,
+      'color:#ddd',
+      `z-index:${TOOLBAR_Z}`,
+      'box-shadow:0 4px 16px rgba(0,0,0,0.3)',
+      'display:none',
+      'line-height:1.4',
+    ].join(';');
+    logList = document.createElement('div');
+    logPanel.appendChild(logList);
+    document.documentElement.appendChild(logPanel);
+  }
+
+  function toggleLogPanel() {
+    logVisible = !logVisible;
+    if (logVisible) {
+      ensureLogPanel();
+      logPanel.style.display = 'block';
+    } else if (logPanel) {
+      logPanel.style.display = 'none';
+    }
+    updateToolbarUI();
+  }
+
+  function logEntry(name, trigger, t, propsChanged) {
+    if (!logVisible || !logList) return;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:6px;padding:1px 2px';
+    const color = TRIGGER_COLORS[trigger] || '#aaa';
+    const propsSummary =
+      Array.isArray(propsChanged) && propsChanged.length > 0
+        ? ' [' + propsChanged.slice(0, 3).join(',') + ']'
+        : '';
+    row.innerHTML =
+      `<span style="color:#666;width:50px;flex:none;text-align:right">+${t}ms</span>` +
+      `<span style="color:${color};width:54px;flex:none">${trigger}</span>` +
+      `<span style="color:#fff;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(name)}<span style="color:#666">${escapeHtml(propsSummary)}</span></span>`;
+    logList.appendChild(row);
+    while (logList.childElementCount > MAX_LOG_ROWS) {
+      logList.removeChild(logList.firstChild);
+    }
+    logPanel.scrollTop = logPanel.scrollHeight;
   }
 
   // Refresh toolbar counter while recording
@@ -967,11 +1121,30 @@
       if (!active) return null;
       const r = active;
       r.durationMs = Math.round(performance.now() - r.startedAt);
+      // User-component events: filter out host elements and framework
+      // wrappers so the headline numbers reflect user-code responsibility
+      // (the same lens react-scan reports). Raw events stay on r.events for
+      // forensic inspection.
+      const userEvents = r.events.filter((e) => !isFrameworkName(e.name));
+      const userByName = {};
+      const userMountsByName = {};
+      for (const e of userEvents) {
+        userByName[e.name] = (userByName[e.name] || 0) + 1;
+        if (e.trigger === 'mount')
+          userMountsByName[e.name] = (userMountsByName[e.name] || 0) + 1;
+      }
+      r.userByName = userByName;
+      r.userMountsByName = userMountsByName;
       r.summary = {
         commits: r.commits,
+        // Default "events" = user-component events (react-scan-style).
+        // rawTotalRenderEvents keeps the unfiltered fiber-visit count.
+        totalRenderEvents: userEvents.length,
+        rawTotalRenderEvents: r.events.length,
+        uniqueUserComponents: Object.keys(userByName).length,
         uniqueComponents: Object.keys(r.byName).length,
-        totalRenderEvents: r.events.length,
-        mounts: Object.values(r.mountsByName).reduce((a, b) => a + b, 0),
+        mounts: Object.values(userMountsByName).reduce((a, b) => a + b, 0),
+        rawMounts: Object.values(r.mountsByName).reduce((a, b) => a + b, 0),
         longTaskCount: r.longTasks.length,
         worstLongTaskMs: r.longTasks.reduce(
           (m, t) => Math.max(m, t.durationMs),
@@ -1062,9 +1235,12 @@
         rect: r && { x: r.left, y: r.top, width: r.width, height: r.height },
       };
     },
-    componentStats() {
-      // sorted snapshot of all observed components
+    componentStats(opts) {
+      // Sorted lifetime per-component history. Default filters framework
+      // wrappers; pass `{ raw: true }` to include them.
+      const raw = !!(opts && opts.raw);
       return Object.entries(nameHistory)
+        .filter(([name]) => raw || !isFrameworkName(name))
         .map(([name, h]) => ({ name, ...h }))
         .sort((a, b) => b.renders - a.renders);
     },
