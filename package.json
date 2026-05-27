@@ -1,0 +1,16 @@
+{
+  "name": "react-render-telemetry-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "React render telemetry with visual overlay, click-to-select inspector, and MCP server",
+  "packageManager": "pnpm@9.0.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "start:mcp": "pnpm --filter @plata/render-telemetry-mcp start"
+  },
+  "author": "Leonid Iakovlev <leonid.iakovlev@plata.work>",
+  "license": "MIT"
+}

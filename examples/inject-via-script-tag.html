@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <title>render-telemetry demo</title>
+    <!-- Inject BEFORE React so the hook patch beats the first commit. -->
+    <script src="../packages/browser/src/render-telemetry.js"></script>
+  </head>
+  <body style="font:14px sans-serif;margin:20px">
+    <h1>render-telemetry demo</h1>
+    <p>
+      Open DevTools, run <code>__renderTelemetry.start('demo')</code>,
+      interact with a React app served from this page (e.g. swap the script
+      tag for your real bundle), then call
+      <code>__renderTelemetry.stop()</code>.
+    </p>
+    <p>
+      The floating toolbar at top-right gives the same actions without
+      typing. Drag the <code>⋮⋮</code> handle to move it; <code>✕</code> hides
+      it (<code>Alt+Shift+R</code> brings it back).
+    </p>
+    <div id="root"></div>
+  </body>
+</html>
